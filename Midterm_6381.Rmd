@@ -1,0 +1,539 @@
+---
+title: 'BIOCB 6381: Biomedical Data Mining & Modelling'
+author: "Lingyu Zhou"
+date: "2023-11-17"
+output: html_document
+---
+
+# Midterm (For BIOCB 6381 Students)
+
+##### THIS IS AN EXAM: You are supposed to do it independently. You can refer to any materials, but no collaboration is allowed. You can post questions on Ed Discussion only when you need further clarification. Please follow the instructions and write your answers in this Rmarkdown document. For submission, please make sure that you submit both the Rmarkdown file and the Knited html file on Canvas.
+
+### Release: October 26, 2023; Due 11:59pm EST, November 17, 2023
+
+```{r setup, include=FALSE, fig.height= 12, fig.width= 15}
+knitr::opts_chunk$set(
+  message = FALSE,
+  warning = FALSE,
+  eval = FALSE
+)
+```
+
+##### In this Midterm project, you will be using the scRNA-seq data from [Shun et al.](https://www.pnas.org/doi/abs/10.1073/pnas.2008762117?url_ver=Z39.88-2003&rfr_id=ori:rid:crossref.org&rfr_dat=cr_pub%20%200pubmed) and they profiled *169,496* nuclei from the prefrontal cortical samples of AD patients and healthy controls by single-nucleus RNA sequencing.
+
+## Before you diving into the questions, please make sure you download the following files from Canvas and make sure you have every file in one folder in your machine:
+
+1.  `seurat.rds`: the dataset you will process, located in the `data` folder
+
+2.  `DE_genes.txt`: the gene list for GO Enrichment Analysis, located in the `data` folder
+
+3.  `Midterm_6381.Rmd`: Please write all your answers and code in this file
+
+4.  `Midterm_6381.html`: Please knit the `.Rmd` file into a html file to better show your code, results, plots and answers.
+
+5.  `images`: a folder for PCA coverage image
+
+For submission, please upload both `Midterm_6381.Rmd` and `Midterm_6381.html` ***ON CANVAS***. (**If you really had a hard time knit the .html file, you can just upload your .Rmd on Canvas**)
+
+### Load Libraries (Please make sure you can install all those packages and load them correctly)
+
+```{r}
+library(Seurat)
+library(DESeq2)
+library(dplyr)
+library(data.table)
+library(ggplot2)
+library(edgeR)
+library(limma)
+set.seed(1234)
+```
+
+# Part 1: scRNA-seq Standard Workflow
+
+## (10 pts) Q1.1 Load Data as a Seurat Object (.rds file) and make two new columns
+
+```{r}
+setwd("D:\\OneDrive - Cornell University\\courses\\BIOCB6381\\Midterm")
+df<-readRDS("data\\seurat.rds")
+```
+
+If you check the rownames of the meta.data in the seurat object, you will find that the rownames look like `AD1_AAACCCAAGCTGAAAT-1`, which the `AD1` indicates not only the sample ID but also the condition of the cell. Therefore, please use generate two new columns `Sample` (AD1,...NC18) and `Condition` (AD or Control). Please use `head()` to show your metadata after you add those two columns.
+
+You should get **179,392** cells with **33,538** features (Seurat Object Size should be \~ **8.6** GB)
+
+```{r}
+row_names <- rownames(df@meta.data)
+name_parts <- strsplit(row_names, "_")
+df$Sample<-sapply(name_parts, function(x) x[1])
+df$Condition <- unlist(lapply(name_parts, function(x) ifelse(substr(x[1], 1, 2) == "AD", "AD", "Control")))
+head(df@meta.data)
+#table(df$Condition)
+#table(df$Sample)
+```
+
+## (5 pts) Q1.2 Quality Control and Filtering
+
+Please calculate the percentage of mitochondria counts by using ***PercentageFeatureSet()*** and draw the violin plot of 3 QC metrics:
+
+-   Number of molecules detected in one cell
+
+-   Number of genes detected in one cell
+
+-   Percentage of mitochondria genes in one cell
+
+```{r}
+df[["percent.mt"]]<-PercentageFeatureSet(df, pattern = "^MT-")
+head(df,5)
+```
+
+```{r}
+VlnPlot(df, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+```
+
+![*Expect violin plot output*](images/1){width="809"}
+
+Besides, To exclude potential dead cells and cell debris from the dataset, we filtered out nuclei with $≤ 200$ or $≥ 2500$ genes, $≥ 20000$ unique molecular identifiers, or $≥ 5%$ mitochondrial genes
+
+```{r}
+df_filtered<-subset(df,subset=(nFeature_RNA>200 & nFeature_RNA<2500) & nCount_RNA<20000 & percent.mt<5)
+
+head(df_filtered,5)
+
+```
+
+### Please answer the following questions:
+
+1.  How many genes are identified in this study?
+
+    -   **33538**
+
+    ```{r}
+    numGenes<-nrow(df_filtered)
+    numGenes
+    ```
+
+2.  How many cells are sequenced in this study?
+
+    -   **109106**
+
+    ```{r}
+    numCells<-ncol(df_filtered)
+    numCells
+    ```
+
+3.  How many samples are included in this study?
+
+    -   **21**
+
+    ```{r}
+    numSamples<-length(unique(as.array(df_filtered$"Sample")))
+    numSamples
+    ```
+
+## (5 pts) Q1.3 Normalizing data and find highly variable features
+
+Please normalize the data and find and **show** the top10 highly variable features
+
+```{r}
+df_filtered<-NormalizeData(df_filtered)
+```
+
+```{r}
+df_filtered<-FindVariableFeatures(df_filtered)
+head(VariableFeatures(df_filtered), 10)
+```
+
+## (5 pts) Q1.4 Sacle data and run PCA (Please set the dimension for PCA to be 50)
+
+```{r}
+df_filtered<-ScaleData(df_filtered)
+df_filtered <- RunPCA(df_filtered, npcs = 50)
+```
+
+## (15 pts) Q1.5 Determine the dimensionailty
+
+In lab section, we have discussed to use the Elbow Plot to determine the dimensionailty of the dataset, but a more systematic method is to PCA coverage Plot.
+
+![PCA](./images/pca.png)
+
+In order to get this plot, we have to calculate the eigenvalues of each PCA and find its percentage of all PCAs. To calculate the eigenvalue ($\lambda$), we just need to find the standard deviation ($\sigma$) of the PCA which is already inside the Seurat object. (e.g. $\lambda_{PCA1} = \sigma_{PCA1}^2$)
+
+Then, we need to calculate the overall percentage of each PCA. For instance, for PCA1: $$percentage_{PCA1} = {\lambda_{PCA1} \over sum(\lambda_{PCA1}, ..., \lambda_{PCA50})} \times 100$$ Therefore, to make the PCA Coverage plot:
+
+-   Please find the standard deviation ($\sigma$) of each PCA in the Seurat object
+
+-   Calculate the percentage of each PCA over all PCAs (50 PCAs in total)
+
+-   Draw the plot to show your results (No matter what tool you use)
+
+To determine the dimensionailty of the data, we just need to determine how much percentage of data we want the PCAs to cover and find how many components we should include, by determine the cumulative sum. For instance, for PCA10: $$cumulative_sum = sum(percentage_{PCA1}, ..., percentage_{PCA10})$$
+
+```{r}
+# Stdev(df[["pca"]])
+
+cov_df<-data.frame("principal component" = numeric(0), "percentage" = numeric(0))
+for (i in 1:50){
+  pc_i_pct=((Stdev(df_filtered[["pca"]])[i])^2)/sum(Stdev(df_filtered[["pca"]])^2)
+  cov_df <- rbind(cov_df,data.frame("principal component" = i, "percentage" = pc_i_pct))
+}
+
+print(cov_df)
+```
+
+```{r}
+# Answer plot:
+
+bp<-barplot(head(cov_df,10)$"percentage", names.arg=(head(cov_df,10)$"principal.component"), xlab = "Principal Component",ylab = "Variance Explained (%)",ylim=c(0,1),col="orange")
+lines(bp,head(cov_df,10)$"percentage", col="red", lwd=2,type="o",pch=20) 
+grid(col = "gray", lty = 2)
+text(bp, head(cov_df,10)$percentage, labels=paste(round(head(cov_df,10)$percentage,3)*100,"%"), pos=3, cex=0.8, col="black")
+title(main="PCA Coverage",adj=0)
+```
+
+![*PCA coverage expected output*](images/2){width="1147"}
+
+### Please answer the following question:
+
+How many principle components should we choose to include to cover over 90% of the data?
+
+-   **24**
+
+```{r}
+cvrg=0
+numPCA=0
+for (i in 1:50){
+  cvrg<-cvrg+cov_df["percentage"][i,]
+  numPCA<-numPCA+1
+  #cat(numPCA," : ",cvrg, "\n")
+  if (cvrg>0.9){
+    break
+  }
+}
+
+numPCA
+```
+
+## (5 pts) Q1.6 UMAP and Clustering
+
+Please use the dimension you determined from previous question to run UMAP to show cell clusters.
+
+```{r}
+df_filtered <- FindNeighbors(df_filtered, dims = 1:24)
+
+```
+
+```{r}
+# dffcopy<-df_filtered
+df_filtered <- FindClusters(df_filtered, resolution = 0.1)
+```
+
+```{r}
+df_filtered<-RunUMAP(df_filtered,dim=1:24) 
+```
+
+```{r}
+DimPlot(df_filtered, reduction = 'umap')
+```
+
+![*UMAP expected output*](images/3){width="975"}
+
+### Please answer the following question:
+
+How many clusters are presented in the UMAP?
+
+-   **11**
+
+## (15 pts) Q1.7 Finding differentially expressed genes and identify cell types
+
+Please use the table below to assign the cluster with its cell type and draw the UMAP with cell type label. Make sure to generate a new column (cell_type) in seu.filtered`@meta.data` that indicate the cell type for each cell.
+
+`Caution: The running time for FindAllMarkers will be ~50 mins`
+
+| Cluster ID | Markers                        | Cell Type                  |
+|------------|--------------------------------|----------------------------|
+| 0          | CTNNA3, ST18                   | Oligo (Oligodendrocytes)   |
+| 1,7,10     | RALYL, MAP1B,TSHZ2             | Excit (Excitatory neurons) |
+| 2          | ADGRV1, SLC1A2                 | Astro (Astrocyte)          |
+| 3,4,6,9    | LHFPL3,ADARB2,KIAA1217,ZNF385D | Inhit (Inhibitory neurons) |
+| 5          | LRMDA, DOCK8                   | Mic (Microglia)            |
+| 8          | FLT1, CLDN5                    | Endo (Endothelial cells)   |
+
+```{r}
+df_filtered.markers <- FindAllMarkers(df_filtered, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25)
+```
+
+```{r}
+new.cluster.ids<-c("Oligo","Excit","Astro","Inhit","Inhit","Mic","Inhit","Excit","Emdo","Inhit","Excit")
+names(new.cluster.ids) <- levels(df_filtered)
+```
+
+```{r}
+umapdf<-RenameIdents(df_filtered, new.cluster.ids)
+```
+
+```{r}
+DimPlot(umapdf, reduction = 'umap', label = TRUE, pt.size = 0.5) + NoLegend()
+```
+
+![*UMAP with labels expected output*](images/4){width="854"}
+
+```{r}
+umapdf@meta.data <- umapdf@meta.data%>%
+  mutate(cell_type = case_when(
+    seurat_clusters == 0 ~ "Oligo",
+    seurat_clusters %in% c(1, 7, 10) ~ "Excit",
+    seurat_clusters == 2 ~ "Astro",
+    seurat_clusters %in% c(3, 4, 6, 9) ~ "Inhit",
+    seurat_clusters == 5 ~ "Mic",
+    seurat_clusters == 8 ~ "Endo",
+  ))
+
+```
+
+```{r}
+seu<-umapdf
+```
+
+```{r}
+## Draft, dont grade this##
+# marker_to_cell_type <- list(
+#   "CTNNA3" = "Oligo",
+#   "ST18" = "Oligo",
+#   "RALYL" = "Excit",
+#   "MAP1B" = "Excit",
+#   "TSHZ2" = "Excit",
+#   "ADGRV1"="Astro",
+#   "SLC1A2"="Astro",
+#   "LHFPL3"="Inhit",
+#   "ADARB2"="Inhit",
+#   "KIAA1217"="Inhit",
+#   "ZNF385D"="Inhit",
+#   "LRMDA"="Mic",
+#   "DOCK8"="Mic",
+#   "FLT1"="Endo",
+#   "CLDN5"="Endo"
+# )
+# 
+# cluster_cell_types <- sapply(df@meta.data$seurat_clusters, function(cluster_id) {
+#   markers <- all_markers[all_markers$cluster == cluster_id, ]
+#   cell_types <- marker_to_cell_type[markers$gene]
+#   return(most_common_cell_type(cell_types))
+# })
+# 
+# df@meta.data$cell_type <- cluster_cell_types
+
+# seu@meta.data
+```
+
+# Part 2: Differential Expression Analysis (DESeq2, EdgeR and GO term enrichment analysis)
+
+## (10 pts) Q2.1 Acquiring necessary metrics for aggregation across cells in a sample
+
+In the lab section, we have talked about the pseudo-bulk workflow to prepare the data for DESeq2 analysis. Please use the following instructions to prepare the data for DESeq2 analysis:
+
+Get the counts matrix in sample level:
+
+1.  Make a new column in the `meta.data` named `condition_sample` that contains the information of both the `Condition` (control or AD) and `Sample` (which sample it came from).
+
+2.  Use `AggregateExpression()` to aggregate the expression into sample level.
+
+3.  Make a dataframe that is the transpose of the aggregated expression. (rows will be the samples and columns will be the genes) and split this dataframe into different cell types (this should be a `Large list` data that contains **9** cell types)
+
+```{r}
+#1.
+seu$condition_sample<- paste0(seu$Condition, seu$Sample)
+seu@meta.data
+#DefaultAssay(df)
+```
+
+```{r}
+#2.
+seu<-AggregateExpression(seu, 
+group.by = c("cell_type","condition_sample"),
+assays = 'RNA',
+slot = "counts",
+return.seurat = FALSE)
+```
+
+```{r}
+#3.
+seu<-seu$RNA
+```
+
+```{r}
+#3.
+seu.t<-t(seu)
+seu<-as.data.frame(seu)
+#seu.t
+```
+
+```{r}
+#colnames(cts.t)
+#colnames(cts.t)[startsWith(colnames(cts.t), "OL")]
+#table(df_filtered$Condition)
+```
+
+```{r}
+#3.
+# splitRows <- gsub('_.*', '', rownames(cts.t))
+seu.split <- split.data.frame(seu.t,f = factor(gsub('_.*', '', rownames(seu.t))))
+# seu.split
+```
+
+```{r}
+#3.
+seu.split.modified <- lapply(seu.split, function(x){
+  rownames(x) <- gsub('.*_(.*)', '\\1', rownames(x))
+  t(x)
+})
+```
+
+## (10 pts) Q2.2 Run DESeq2 Analysis in Oligodendrocytes
+
+Please use the cutoffs of adjusted p value (FDR) \< 0.01 and abs(log2FoldChange) \> 0 to find the differentially expressed genes for `AD vs. Control`
+
+```{r}
+#olig_nc <- slt.split.modified$Control[grepl("^OLIG", rownames(slt.split.modified$Control)), , drop = FALSE]
+#olig_ad <- slt.split.modified$AD[grepl("^OLIG", rownames(slt.split.modified$AD)), , drop = FALSE]
+cntmtx<-seu.split.modified$Oligo
+clmnData <- data.frame(samples = colnames(cntmtx))
+```
+
+```{r}
+library(tibble)
+clmnData <- clmnData %>%
+  mutate(condition = ifelse(grepl('AD', samples), 'AD', 'Control')) %>%
+  column_to_rownames(var = 'samples')
+```
+
+```{r}
+# no error 
+mydds<- DESeqDataSetFromMatrix(countData = cntmtx,
+                              colData = clmnData,
+                              design = ~ condition)
+
+```
+
+```{r}
+#keep <- rowSums(counts(mydds)) >=10
+#mydds <- mydds[keep,]
+mydds<- DESeq(mydds) #"error if a>b (dim=a*b)"
+```
+
+```{r}
+myddsresult <- results(mydds)
+myddsresultdf<-as.data.frame(myddsresult)
+subset(myddsresultdf, padj < 0.01 & abs(log2FoldChange) > 0)
+```
+
+```{r}
+myddsresultdf_f<-subset(myddsresultdf, padj < 0.01 & abs(log2FoldChange) > 0)
+nrow(myddsresultdf_f)
+#myddsresultdf[grepl("^GD", rownames(myddsresultdf)), , drop = FALSE]
+#myddsresult
+```
+
+### Please answer the following question:
+
+How many DE genes you found by using DESeq2?
+
+-   **3**
+
+## (15 pts) Q2.3 Run EdgeR Analysis in Astrocytes and compare the results with DESeq2
+
+Learning how to use a new tool is important for computational biologists; thus, in this question you will use all the online resources to run the EdgeR analysis and compare its result with DESeq2 result. `HINT: This [website](https://rnnh.github.io/bioinfo-notebook/docs/DE_analysis_edgeR_script.html) is good resources for you to run EdgeR with the data that we created for DESeq2` Please follow the steps here:
+
+1.  Create a DGEList object
+
+2.  Filtering lowly expressed genes
+
+3.  Normalising samples
+
+4.  Estimating dispersion
+
+5.  Run pairwise testing
+
+6.  Use `topTags()` to get results and compare it with DESeq2.
+
+### Please answer the following question:
+
+How many DE genes you found by using EdgeR and how many are overlapped with the ones found by DESeq2?
+
+-   **2(SLC25A48 and GDNF-AS1)**
+
+```{r}
+#1.
+dgel <- DGEList(counts = cntmtx)
+```
+
+```{r}
+#2.
+dgel_f<-dgel[filterByExpr(dgel), , keep.lib.sizes = FALSE]
+dim(dgel_f)
+```
+
+```{r}
+#3.
+dgel_fn<-calcNormFactors(dgel_f)
+
+```
+
+```{r}
+dgel_fn$samples$norm.factors
+```
+
+```{r}
+dgel_fn$samples$group <- ifelse(substr(rownames(dgel_fn$samples),1,2) == "AD", "AD", "Control")
+```
+
+```{r}
+#4.
+
+dgel_ep<-estimateDisp(dgel_fn,design=model.matrix(~dgel_fn$samples$group))
+```
+
+```{r}
+#5.
+pwt.rslt=exactTest(dgel_ep,pair=c("AD", "Control"))
+```
+
+```{r}
+topTags(pwt.rslt)
+```
+
+```{r}
+# Answer
+pwt.toptag<-topTags(pwt.rslt)
+print(intersect(row.names(myddsresultdf_f),row.names(pwt.toptag)))
+print(length(intersect(row.names(myddsresultdf_f),row.names(pwt.toptag))))
+```
+
+## (5 pts) Run DAVID GO analysis
+
+In the paper, they performed DE analysis using limma and found many DE genes that are enriched in AD patients. Please use the `DE_genes.txt` to run DAVID GO analysis (<https://david.ncifcrf.gov/>) to see whether these genes are enriched in specific biological process (BP), pathways, etc.
+
+To run the DAVID GO analysis:
+
+1.  Go to the website and click `Start Analysis`
+
+2.  Upload your files and select `OFFICIAL_GENE_SYMBOL`, then type `Homo sapiens` in Step 2a.
+
+3.  Select `Gene List` in Step 3 and clikc `Submit`
+
+4.  In Step 2, click `Functional Annotation Tool`, then click `Functional Annotation Clustering` see if there is anything interesting.
+
+Please provide a screenshot of the final result (just need to show how many clusters you found with the gene list) and in a few sentences, discuss that how those specific biological process (BP), pathways you found are related to AD.
+
+![Screenshot of DAVID GO Analysis final result](davidgores.jpg)
+
+-   **If we filter Functional Annotation Clustering Classification Stringency to High and below, we can find KEGG_PATHWAY is related to Alzheimer disease and its corresponding p-value is very small, indicating it's a very significant pathway for Alzheimer disease and all other major diseases. So, this is a cluster worth focusing on. Also, signal transduction terms across clusters reflect that signaling pathways like Wnt, Notch, and TGF-beta associated with neuroplasticity and cell survival are altered in Alzheimer's. Furthermore, after looking for pathology information on the internet, I found the following relationships of clustering and Alzheimer disease:**
+
+    -   **Cluster 1 groups terms related to extra cellular matrix, collagen, and bone development. Alterations in extra cellular matrix proteins and collagen metabolism have been linked to amyloid-beta accumulation and neuro inflammation in Alzheimer's.**
+
+    -   **Cluster 2 features immune system and inflammatory terms. Neuro inflammation mediated by microglia and astrocytes is a known contributor to Alzheimer's pathogenesis. The enriched inflammatory genes suggest immune system involvement.**
+
+    -   **Cluster 3 contains cell adhesion terms. Disruption of cell adhesion molecules like cadherins may contribute to synaptic dysfunction and neuro degeneration in Alzheimer's.**
+
+    -   **Cluster 4 groups vasculature development terms. Cerebro vascular dysfunction is thought to play a role in Alzheimer's. Enrichment of angiogenesis genes could reflect these vascular changes.**
+
+# Congradulation!!! You have finished all the questions for the Midterm and I hope that you have learned something from this.
