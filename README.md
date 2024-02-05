@@ -6,4 +6,7 @@
 - Linear algebra
 - Cytoscape
 - SQL(pandas)
+- Linux
+- SSH
+- Gene editing/aligning (FASTA/FASTQ/SEURAT)
 ### Datasets not uploaded due to size
